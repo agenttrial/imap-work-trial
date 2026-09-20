@@ -90,7 +90,13 @@ async def login(session: Session, cmd: Command) -> None:
             log.info("[%s] LOGIN refused: inbox not visible to this key", session.conn_id)
             raise no("invalid credentials", "AUTHENTICATIONFAILED") from exc
     session.state = State.AUTHENTICATED
-    log.info("[%s] LOGIN ok for inbox %s", session.conn_id, userid)
+    log.info(
+        "[%s] LOGIN ok for inbox %s (key scope: %s%s)",
+        session.conn_id,
+        userid,
+        scope_type or "unknown",
+        "" if scope_type == "inbox" else ", verified by inbox lookup",
+    )
     session.write(
         r.tagged(cmd.tag, "OK", "LOGIN completed", code=f"CAPABILITY {' '.join(CAPABILITIES)}")
     )
