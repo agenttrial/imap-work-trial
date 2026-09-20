@@ -437,6 +437,26 @@ Design implications already built in: base URL from configuration, no assumption
 
 ---
 
+### 7.1 Verified against a real AgentMail inbox (2026-09-20)
+
+Run against `api.agentmail.to` with a fresh free-tier inbox, an inbox-scoped key, three Gmail-sent messages (plain, Unicode subject and body, attachment) and drafts created through the API. The smoke script passed eleven of eleven steps; the hand-driven session exercised STORE, EXPUNGE to trash, the Trash view, and real draft deletion. Findings:
+
+| Assumption | Result |
+| --- | --- |
+| Message ids are RFC Message-IDs (`<...@mail.gmail.com>`, containing `=`, `+`) | Confirmed; percent-encoded path segments accepted by every endpoint |
+| List `size` equals raw `size` equals downloaded length | Confirmed on all three messages (6308, 19079, 6392 bytes) |
+| Raw download is a presigned URL that needs no credentials | Confirmed: `https://cdn.agentmail.to/raw-messages/...`, 200, `message/rfc822`, `Content-Length` matches, one-hour expiry |
+| Draft list items omit `text`, include `created_at` | Confirmed; new drafts also carry a `draft` label |
+| Error body shape | `{name, code, message}` with `code: not_found` on 404; an invalid key yields **403** `{"message": "Forbidden"}`, not 401. Both are mapped to authentication failure |
+| Inbox-scoped key | `/auth/me` reports `scope_type: inbox`; LOGIN takes the strict path |
+| Label writes | `PATCH` returns the updated label list immediately |
+| `DELETE /drafts/{id}` | Works; EXPUNGE in Drafts removed the draft and announced `* 2 EXPUNGE` |
+| Trash view (`labels=trash&include_trash=true`) | Shows a message trashed by our EXPUNGE |
+| **List endpoint consistency** | **Lags label writes by seconds.** A listing 0.4 s after a trash `PATCH` still returned the old labels; 60 s later it had caught up. The fake has no such lag. Consequence before the fix: `EXPUNGE` answered `OK` without `* n EXPUNGE`, and a `NOOP` right after `STORE` could flip a flag back briefly. Fix: labels we write are held locally over stale listings until the listing agrees or 60 s pass, mirroring the APPEND pin |
+| Latency | LOGIN 110 ms, SELECT of 3 messages 160 ms, body download 370 ms, APPEND about 930 ms including its re-listing |
+
+Not yet verified against production: a real 429 and its `Retry-After` format, permission-scoped keys (403 on specific operations), behaviour with more than one page of messages, and Thunderbird.
+
 ## 8. Risks and unknowns
 
 - Byte-versus-character mistakes. Mitigation: bytes everywhere for message content, the UTF-8 fixture in every size assertion.

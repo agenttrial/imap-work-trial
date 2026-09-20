@@ -171,6 +171,27 @@ class MailboxService:
         # tombstoned and the item visible in the meantime.
         self._pinned: dict[tuple[str, str], dict[str, tuple[float, tuple]]] = {}
         self._pin_ttl = 120.0
+        # Labels we wrote ourselves, held over what listings report until the listing agrees or
+        # the hold expires. AgentMail's list endpoint lags label writes by seconds (observed
+        # against production), which would otherwise make EXPUNGE silent and flags flap.
+        self._label_overrides: dict[str, dict[str, tuple[float, frozenset[str]]]] = {}
+        self._override_ttl = 60.0
+
+    def _hold_labels(self, inbox_id: str, message_id: str, labels: frozenset[str]) -> None:
+        expires = asyncio.get_running_loop().time() + self._override_ttl
+        self._label_overrides.setdefault(inbox_id, {})[message_id] = (expires, labels)
+
+    def _effective_labels(
+        self, inbox_id: str, message_id: str, listed: frozenset[str]
+    ) -> frozenset[str]:
+        overrides = self._label_overrides.get(inbox_id)
+        if not overrides or message_id not in overrides:
+            return listed
+        expires, held = overrides[message_id]
+        if listed == held or expires < asyncio.get_running_loop().time():
+            overrides.pop(message_id, None)  # converged, or gave up waiting
+            return listed
+        return held
 
     @staticmethod
     def _ckey(inbox_id: str, kind: str, ident: str) -> str:
@@ -346,7 +367,9 @@ class MailboxService:
                 log.warning("duplicate message_id %s in listing; keeping first", message_id)
                 continue
             seen.add(message_id)
-            labels = frozenset(str(x) for x in (m.get("labels") or []))
+            labels = self._effective_labels(
+                inbox_id, message_id, frozenset(str(x) for x in (m.get("labels") or []))
+            )
             if labels & mdef.exclude_labels:
                 continue
             ts = draftmod.parse_iso8601(m.get("timestamp") or m.get("created_at"))
@@ -600,6 +623,7 @@ class MailboxService:
         labels = frozenset(str(x) for x in (result.get("labels") or []))
         if not result.get("labels"):
             labels = (item.labels | set(add)) - set(remove)
+        self._hold_labels(inbox_id, item.remote_id, labels)
         updated = Item(
             uid=item.uid,
             remote_key=item.remote_key,
@@ -658,7 +682,11 @@ class MailboxService:
                     await api.delete_draft(inbox_id, item.remote_id)
                     self._unpin(inbox_id, mdef.name, item.remote_key)
                 else:
-                    await api.update_labels(inbox_id, item.remote_id, add=("trash",))
+                    result = await api.update_labels(inbox_id, item.remote_id, add=("trash",))
+                    labels = frozenset(str(x) for x in (result.get("labels") or []))
+                    if "trash" not in labels:
+                        labels = item.labels | {"trash"}
+                    self._hold_labels(inbox_id, item.remote_id, labels)
                 removed = True
             except Exception as exc:  # noqa: BLE001 - reported to the caller per item
                 errors.append(exc)

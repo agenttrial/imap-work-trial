@@ -2,6 +2,7 @@
 tombstoning on partial failure, coalesced concurrent syncs, and draft rendering keys."""
 
 import asyncio
+import json
 import re
 import tempfile
 import unittest
@@ -803,3 +804,81 @@ class AuthoritativeSizeUnitTests(unittest.IsolatedAsyncioTestCase):
         meta_size["value"] = 40
         self.assertEqual(await self.service.raw_bytes(api, INBOX, "INBOX", item), body)
         self.assertEqual(await self.service.size_of(api, INBOX, "INBOX", item), 40)
+
+
+class LabelWriteLagTests(unittest.IsolatedAsyncioTestCase):
+    """Observed against production: the list endpoint lags label writes by seconds. Our own
+    writes must win over stale listings until the listing agrees or the hold expires."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = UidStore(Path(self.tmp.name) / "u.sqlite3")
+        self.service = MailboxService(
+            self.store, ByteCache(10_000_000), Settings(refresh_interval=0.0)
+        )
+
+    async def asyncTearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def lagging_api(self):
+        """PATCH succeeds and echoes the new labels, but listings keep returning the old ones."""
+        router = FakeRouter()
+        patches = []
+
+        def routed(call):
+            if call.method == "PATCH":
+                body = json.loads(call.body)
+                patches.append(body)
+                labels = ["received", "unread"]
+                for label in body.get("add_labels", []):
+                    if label not in labels:
+                        labels.append(label)
+                for label in body.get("remove_labels", []):
+                    if label in labels:
+                        labels.remove(label)
+                return json_response(200, {"message_id": "m_old", "labels": labels})
+            return router(call)
+
+        t = ScriptedTransport(router=routed)
+
+        async def nosleep(_):
+            return None
+
+        return AgentMailClient(BASE, "k", t, max_attempts=1, sleep=nosleep), patches
+
+    async def test_trashed_message_leaves_the_view_despite_stale_listing(self):
+        api, patches = self.lagging_api()
+        snap = await self.service.sync(api, INBOX, "INBOX")
+        target = snap.by_uid[1]  # m_old
+        errors = await self.service.expunge_items(api, INBOX, "INBOX", [target])
+        self.assertEqual(errors, [])
+        self.assertEqual(patches[-1]["add_labels"], ["trash"])
+        after = await self.service.sync(api, INBOX, "INBOX", force=True)
+        self.assertNotIn(1, after.by_uid)  # gone immediately, not after the listing catches up
+        self.assertEqual(self.store.mailbox_info(INBOX, "INBOX")[1], 4)  # UID never reused
+        # When the hold expires and the listing still shows the message (upstream reverted or
+        # never applied), the listing wins again and the message returns with a new UID.
+        self.service._override_ttl = -1.0
+        self.service._label_overrides[INBOX]["m_old"] = (-1.0, frozenset())
+        back = await self.service.sync(api, INBOX, "INBOX", force=True)
+        self.assertIn("m_old", {i.remote_id for i in back.items})
+        self.assertGreater(max(i.uid for i in back.items), 3)
+
+    async def test_flag_change_does_not_flap_on_stale_listing(self):
+        api, _ = self.lagging_api()
+        snap = await self.service.sync(api, INBOX, "INBOX")
+        item = snap.by_uid[1]
+        updated = await self.service.set_flag(api, INBOX, "INBOX", item, "\\Seen", True)
+        self.assertIn("\\Seen", updated.flags)
+        after = await self.service.sync(api, INBOX, "INBOX", force=True)
+        self.assertIn("\\Seen", after.by_uid[1].flags)  # held, not flapped back to unseen
+
+    async def test_hold_released_when_listing_agrees(self):
+        api, _ = self.lagging_api()
+        snap = await self.service.sync(api, INBOX, "INBOX")
+        await self.service.set_flag(api, INBOX, "INBOX", snap.by_uid[1], "\\Seen", True)
+        # Simulate the listing catching up: feed labels equal to the held value.
+        held = self.service._label_overrides[INBOX]["m_old"][1]
+        self.assertEqual(self.service._effective_labels(INBOX, "m_old", held), held)
+        self.assertNotIn("m_old", self.service._label_overrides.get(INBOX, {}))

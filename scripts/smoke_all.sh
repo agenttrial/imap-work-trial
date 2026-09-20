@@ -12,6 +12,19 @@ export IMAP_PORT="${IMAP_PORT:-1143}"
 export IMAPGW_DB_PATH="${IMAPGW_DB_PATH:-$(mktemp -d)/imapgw-smoke.sqlite3}"
 export IMAPGW_LOG_LEVEL="${IMAPGW_LOG_LEVEL:-WARNING}"
 
+port_free() {
+  ! uv run python -c "import socket,sys; s=socket.socket(); s.settimeout(0.5); sys.exit(0 if s.connect_ex(('$1', $2))==0 else 1)"
+}
+
+# Refuse to run against a listener we did not start: a stale server on the port would make
+# the results meaningless (and once made a real-API server look like a failing fake one).
+if [ "${SKIP_FAKE_API:-0}" != "1" ] && ! port_free 127.0.0.1 3210; then
+  echo "port 3210 is already in use; stop the existing fake API or set SKIP_FAKE_API=1" >&2; exit 2
+fi
+if ! port_free "$IMAP_HOST" "$IMAP_PORT"; then
+  echo "port $IMAP_HOST:$IMAP_PORT is already in use; stop the existing server or set IMAP_PORT" >&2; exit 2
+fi
+
 PIDS=()
 cleanup() {
   for pid in "${PIDS[@]:-}"; do

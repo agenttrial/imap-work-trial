@@ -279,8 +279,12 @@ middle of a `FETCH`, `STORE`, or `SEARCH`.
 - **Single process.** Coalescing and caching are per process; scaling out requires the shared
   UID store described in DESIGN.md section 5.
 - **`\Recent` is never set**, `RECENT` is always 0, and `NEW` matches nothing.
-- **Production behaviour is untested.** Everything above was verified against the provided fake
-  API. Assumptions to confirm against a hosted sandbox are listed in DESIGN.md section 7.
+- **Verified against a real AgentMail inbox once** (DESIGN.md section 7.1): ids, sizes, the
+  presigned download, drafts, label writes, and draft deletion all behaved as assumed. One
+  production behaviour the fake lacks was found and handled: the list endpoint lags label writes
+  by a few seconds, so labels the gateway writes itself are held over stale listings for up to
+  60 seconds. Not yet observed in production: 429 responses, permission-scoped keys, mailboxes
+  larger than one page.
 - Next: `ENVELOPE`/`BODYSTRUCTURE`, `IDLE`, `MOVE`, `AUTHENTICATE PLAIN`, `LITERAL+`, a
   Thunderbird interoperability pass (see `STANDARD_IMAP_CLIENT.md`), and a smoke run against the
   hosted sandbox.

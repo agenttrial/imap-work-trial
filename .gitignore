@@ -34,5 +34,10 @@ vendor/
 *.db-*
 *.sqlite
 *.sqlite3
+*.sqlite3-*
+*.validity
 *.log
 tmp/
+
+# Personal scratch files
+example.txt
