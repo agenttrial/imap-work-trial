@@ -455,7 +455,10 @@ Run against `api.agentmail.to` with a fresh free-tier inbox, an inbox-scoped key
 | **List endpoint consistency** | **Lags label writes by seconds.** A listing 0.4 s after a trash `PATCH` still returned the old labels; 60 s later it had caught up. The fake has no such lag. Consequence before the fix: `EXPUNGE` answered `OK` without `* n EXPUNGE`, and a `NOOP` right after `STORE` could flip a flag back briefly. Fix: labels we write are held locally over stale listings until the listing agrees or 60 s pass, mirroring the APPEND pin |
 | Latency | LOGIN 110 ms, SELECT of 3 messages 160 ms, body download 370 ms, APPEND about 930 ms including its re-listing |
 
-Not yet verified against production: a real 429 and its `Retry-After` format, permission-scoped keys (403 on specific operations), behaviour with more than one page of messages, and Thunderbird.
+| Organisation-scoped key | Confirmed: `/auth/me` reports `scope_type: organization`; LOGIN verifies the named inbox with `GET /inboxes/{id}` and succeeds |
+| Restricted key (`inbox_read` + `message_read` only) | LOGIN, SELECT, FETCH, and the Trash listing work. `UID STORE` is denied upstream with **403** `{"name":"ForbiddenError","code":"missing_permission","message":"Forbidden","fix":"This API key does not have the 'message_update' permission..."}`; the gateway answers `NO [CANNOT]` and the session continues (an earlier version ended the session with `BYE` on any 403) |
+
+Not yet verified against production: a real 429 and its `Retry-After` format, an organisation key naming an inbox it cannot see (covered by unit tests; the production attempt was intercepted by the `AGENTMAIL_INBOX_ID` allowlist), behaviour with more than one page of messages, and Thunderbird.
 
 ## 8. Risks and unknowns
 
