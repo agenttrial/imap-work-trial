@@ -83,7 +83,12 @@ async def login(session: Session, cmd: Command) -> None:
         log.info("[%s] LOGIN refused: key is scoped to a different inbox", session.conn_id)
         raise no("invalid credentials", "AUTHENTICATIONFAILED")
     if scope_type != "inbox" or not scoped_inbox:
-        await api.get_inbox(userid)
+        # Pod- or organisation-scoped key: prove it can see the named inbox.
+        try:
+            await api.get_inbox(userid)
+        except (NotFoundError, BadRequestError) as exc:
+            log.info("[%s] LOGIN refused: inbox not visible to this key", session.conn_id)
+            raise no("invalid credentials", "AUTHENTICATIONFAILED") from exc
     session.state = State.AUTHENTICATED
     log.info("[%s] LOGIN ok for inbox %s", session.conn_id, userid)
     session.write(
@@ -123,7 +128,7 @@ def register(name: str, handler: Handler) -> None:
 
 import re as _re  # noqa: E402
 
-from imapgw.apiclient import NotFoundError  # noqa: E402
+from imapgw.apiclient import BadRequestError, NotFoundError  # noqa: E402
 from imapgw.fetch import (  # noqa: E402
     FetchAttr,
     FetchSyntaxError,

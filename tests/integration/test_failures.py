@@ -121,3 +121,26 @@ class ConcurrencyUnderFailureTests(GatewayTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PermissionDenialTests(GatewayTestCase):
+    """A 403 after login is a missing permission on a restricted key: refuse the command, keep
+    the session. Only a 401 (revoked key) ends the session."""
+
+    async def test_403_mid_session_is_no_cannot_not_bye(self):
+        c = await self.logged_in()
+        await c.cmd("SELECT INBOX")
+        self.fake.fail_next(method="PATCH", path_prefix="/inboxes", status=403, times=1)
+        resp = await c.cmd("UID STORE 1 +FLAGS (\\Seen)")
+        self.assertEqual((resp.status, resp.code()), ("NO", "CANNOT"), resp)
+        self.assertIn("UID", resp.text)
+        # Session still alive and the flag unchanged.
+        self.assertEqual((await c.cmd("NOOP")).status, "OK")
+        self.assertIn(b"FLAGS ()", (await c.cmd("UID FETCH 1 (FLAGS)")).fetch_by_uid()[1].line)
+
+    async def test_403_at_login_is_still_authentication_failure(self):
+        self.fake.fail_next(method="GET", path_prefix="/auth/me", status=403, times=1)
+        c = await self.client()
+        resp = await c.cmd(f'LOGIN "{INBOX_ID}" "{API_KEY}"')
+        self.assertEqual((resp.status, resp.code()), ("NO", "AUTHENTICATIONFAILED"))
+        self.assertEqual((await c.cmd("NOOP")).status, "OK")

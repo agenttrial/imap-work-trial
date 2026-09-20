@@ -269,8 +269,11 @@ middle of a `FETCH`, `STORE`, or `SEARCH`.
   records the highest value ever issued, so a database that is lost, corrupt, or recreated within
   the same second still gets a strictly larger value, even if the clock went backwards. Deleting
   both the database and the sidecar is a deliberate fresh start and the only way to reuse a value.
-- **Every 401 or 403 is treated as invalid credentials.** A key that is valid but lacks a specific
-  permission is indistinguishable from a revoked one and ends the session with `BYE`.
+- **Restricted keys.** At `LOGIN`, 401 and 403 both mean invalid credentials (production answers
+  an unknown key with 403). After login, a 403 is treated as a permission the key lacks: the
+  command gets `NO [CANNOT]` and the session continues; a 401 means the key was revoked and ends
+  the session with `BYE`. Pod- and organisation-scoped keys log in by naming any inbox the key
+  can read; naming one it cannot see is refused as invalid credentials.
 - **`Retry-After` is honoured only in seconds form**; an HTTP-date value falls back to exponential
   backoff.
 - **Draft deletion cannot be exercised against the fake** (no `DELETE /drafts` route); it is

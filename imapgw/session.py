@@ -222,9 +222,18 @@ class Session:
                 await handler(self, cmd)
         except CommandFailed as exc:
             self.write(r.tagged(cmd.tag, exc.status, exc.text, exc.code))
-        except AuthError:
+        except AuthError as exc:
             if self.state is State.NOT_AUTHENTICATED:
+                # At LOGIN, 401 and 403 both mean the credentials are no good (production
+                # answers an unknown key with 403).
                 self.write(r.tagged(cmd.tag, "NO", "invalid credentials", "AUTHENTICATIONFAILED"))
+            elif exc.status == 403:
+                # A valid key that lacks the permission for this operation (restricted keys).
+                # Refuse the command, keep the session.
+                log.info("[%s] upstream denied %s for this key (403)", self.conn_id, cmd.name)
+                self.write(
+                    r.tagged(cmd.tag, "NO", f"this API key may not perform {cmd.name}", "CANNOT")
+                )
             else:
                 log.warning("[%s] upstream rejected credentials mid-session", self.conn_id)
                 self.write(r.bye("credentials no longer valid"))
