@@ -30,3 +30,13 @@ class WildcardTests(unittest.TestCase):
         self.assertFalse(_wildcard_match("*" * 1000 + "Z", "INBOX"))
         self.assertTrue(_wildcard_match("*" * 1000 + "X", "INBOX"))
         self.assertLess(time.monotonic() - started, 0.1)
+
+
+class UidSetTests(unittest.TestCase):
+    def test_compresses_runs(self):
+        from imapgw.commands import _uid_set
+
+        self.assertEqual(_uid_set([1]), "1")
+        self.assertEqual(_uid_set([5, 1, 3, 4, 9]), "1,3:5,9")
+        self.assertEqual(_uid_set([2, 3, 4]), "2:4")
+        self.assertEqual(_uid_set([]), "")

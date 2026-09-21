@@ -1,6 +1,6 @@
 # Design: an IMAP4rev1 gateway for AgentMail
 
-Status: implemented 2026-09-19 (steps 0-12 of section 8a; Thunderbird pass pending). Originally a draft for discussion; decision records below are kept as written, with implementation notes where the build deviated. Every decision below lists the alternatives considered, the tradeoffs, the choice, and what would make us revisit it. Decisions marked **PENDING** need the user's input.
+Status: implemented 2026-09-19 (steps 0-12 of section 8a); Thunderbird pass run 2026-09-20 with two fixes (section 8c). Originally a draft for discussion; decision records below are kept as written, with implementation notes where the build deviated. Every decision below lists the alternatives considered, the tradeoffs, the choice, and what would make us revisit it. Decisions marked **PENDING** need the user's input.
 
 Companion material: `ASSIGNMENT.md` (the spec), `notes/` (condensed source material), `CLAUDE.md` (harness behavior).
 
@@ -537,6 +537,28 @@ A second review of the fixed version found six more defects, all confirmed and f
 The second reviewer also re-raised two design points: `RFC822.SIZE` from the list field, now reversed (see D7), and `SEARCH KEYWORD` matching labels, kept as a documented feature.
 
 Documentation claims the reviewer found overstated were corrected in the README: "message content never becomes `str`", "redacted from all log output", the FETCH modifier wording, keyword rejection status, the refresh-on-age claim, the download "no headers at all" wording, the stale-draft protection claim, and the fake's injection ordering in the notes. Two weak tests it identified were fixed (an assertion that ran after resetting the fake; a test that claimed to fault page two).
+
+## 8c. Thunderbird pass (2026-09-20)
+
+Thunderbird 156 on macOS, manual configuration per `STANDARD_IMAP_CLIENT.md`, against the real inbox. The whole session was captured from both sides (server at DEBUG, Thunderbird with `MOZ_LOG=IMAP:5`) so every claim below is from a transcript, not a guess.
+
+What Thunderbird actually sent: `ID`, `NAMESPACE`, `LIST "" "*"`, `LIST "" "INBOX"`, `LSUB`, `SELECT` of every folder on its own connection (five connections), `UID FETCH n:* (FLAGS)`, `UID FETCH ... (UID RFC822.SIZE FLAGS BODY.PEEK[HEADER.FIELDS (From To Cc Bcc Subject Date Message-ID Priority X-Priority References Newsgroups In-Reply-To Content-Type Reply-To Received)])` for the list, `UID FETCH n (UID RFC822.SIZE BODY.PEEK[])` to open a message, `UID STORE` for star and read state, `NOOP` polling, `CLOSE`, `LOGOUT`. Every one of those succeeded on the unchanged server. It did **not** send `ENVELOPE`, `BODYSTRUCTURE`, or numbered sections: it fetches messages under its 30 KB threshold whole, and both test messages were under it. The assumption in section 8a that these would be the first blocker was wrong for this inbox; they remain necessary for larger messages and for iPhone Mail, which uses them for every message.
+
+Two operations failed, and the account-setup wizard needed a workaround:
+
+| Observation | Cause | Decision |
+| --- | --- | --- |
+| Saving a draft: `102 NO [CANNOT] no text/plain part; HTML-only drafts are not supported` | Thunderbird's compose window saves the draft as `text/html` only, no plain alternative | **Flatten HTML to text** in `APPEND` (D8 addendum). Alternatives: refuse and tell users to compose in plain text (a per-client setting; the iPhone cannot be told), or send `html` to the API (the sandbox rejects it, and the assignment scopes drafts as plain text). Flattening keeps paragraphs, line breaks, list dashes and link targets, loses the rest, and is documented as lossy |
+| Deleting a message: `89 BAD unsupported UID command` for `uid copy 1 "Trash"`; the message reappeared in the list | Thunderbird deletes by copying to Trash, then `STORE \Deleted` and `EXPUNGE`; `COPY` was unsupported and the `UID` dispatcher answered `BAD` rather than `NO` for a valid but unsupported command | **Support `COPY` and `MOVE` into `Trash` only**, as "add the trash label", the same write `EXPUNGE` already makes (D13 below). `MOVE` is advertised so Thunderbird uses the single command |
+| The setup wizard reported "couldn't connect" although the server was reachable | The wizard's pre-check opens the port and closes it within a millisecond without sending a command (two such connections in the server log); the mail engine itself never ran | Documented: use **Advanced configuration** to save the account without the probe. Not a server defect |
+
+### D13. COPY and MOVE as label writes
+
+Options: (a) keep refusing `COPY`, so desktop clients cannot delete; (b) accept `COPY`/`MOVE` into `Trash` as adding the `trash` label, refuse every other destination; (c) model `COPY` between arbitrary views as label add/remove pairs.
+
+(c) is dishonest for a label model: copying `INBOX` to `Sent` would have to add `sent` to a received message, and copying to `INBOX` would add `received` to a sent one. (b) is exactly AgentMail's soft delete and already the meaning of `EXPUNGE` here, so it adds no new semantics. Choice: **(b)**.
+
+Mechanics: the Trash UID is allocated at copy time from the message's own id (the same key the Trash listing uses), the item is pinned in the Trash view until a listing shows it (the list endpoint lags label writes; section 7.1), and the label is held over stale source listings. `COPYUID` therefore carries the real Trash UID immediately. After `COPY` the message leaves its source view at the next safe point (`NOOP`, or the client's own `EXPUNGE`); `MOVE` re-lists the source and announces `EXPUNGE` before its tagged `OK`, per RFC 6851. Partial failure: a message already labelled stays in Trash and the command answers `NO`, so a retry finishes the rest. Sequence-number and UID forms are both supported; nonexistent UIDs are ignored as in `FETCH`.
 
 ## 9. Open questions for the user
 

@@ -94,13 +94,31 @@ class AppendTests(GatewayTestCase):
         ]
         self.assertEqual(created[0]["text"].strip(), "plain body")
 
-    async def test_html_only_and_attachments_rejected(self):
+    async def test_html_only_draft_is_saved_as_text(self):
+        # Thunderbird's compose window saves drafts as text/html only (observed 2026-09-20).
+        c = await self.logged_in()
+        raw = (
+            b"To: x@example.com\r\nSubject: Test Subject\r\nMIME-Version: 1.0\r\n"
+            b"Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n"
+            b"<html><body><p>This is a line of text</p><p>Second &amp; last</p></body></html>\r\n"
+        )
+        resp = await c.cmd_literal("APPEND Drafts", raw)
+        self.assertEqual((resp.status, resp.code()[:9]), ("OK", "APPENDUID"), resp)
+        created = [
+            d for d in self.fake.state()["drafts"] if d["draft_id"].startswith("draft_created_")
+        ]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["subject"], "Test Subject")
+        self.assertEqual(created[0]["text"], "This is a line of text\n\nSecond & last\n")
+        self.assertNotIn("html", created[0])
+
+    async def test_binary_only_and_attachments_rejected(self):
         c = await self.logged_in()
         resp = await c.cmd_literal(
-            "APPEND Drafts", b"To: x@example.com\r\nContent-Type: text/html\r\n\r\n<p>hi</p>\r\n"
+            "APPEND Drafts", b"To: x@example.com\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n"
         )
         self.assertEqual((resp.status, resp.code()), ("NO", "CANNOT"))
-        self.assertIn("text/plain", resp.text)
+        self.assertIn("text/plain or text/html", resp.text)
         raw = (
             b"To: x@example.com\r\nSubject: att\r\nMIME-Version: 1.0\r\n"
             b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n'

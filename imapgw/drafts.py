@@ -7,12 +7,14 @@ protocol itself is implemented elsewhere in this package by hand.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import format_datetime
+from html.parser import HTMLParser
 
 DRAFT_ID_HEADER = "X-AgentMail-Draft-Id"
 
@@ -118,11 +120,19 @@ def parse_append(raw: bytes) -> DraftFields:
         for _ in msg.iter_attachments():
             raise DraftParseError("attachments are not supported in new drafts")
     body = msg.get_body(preferencelist=("plain",))
+    html_body = None
     if body is None:
-        raise DraftParseError("no text/plain part; HTML-only drafts are not supported")
+        # Desktop clients (Thunderbird, Apple Mail) save drafts as text/html with no plain
+        # alternative. AgentMail drafts are plain text here, so the HTML is flattened.
+        html_body = msg.get_body(preferencelist=("html",))
+        if html_body is None:
+            raise DraftParseError("no text/plain or text/html part in the message")
+        body = html_body
     if body.get_content_disposition() == "attachment":
         raise DraftParseError("attachments are not supported in new drafts")
     text = _decode_text_part(body).replace("\r\n", "\n")
+    if html_body is not None:
+        text = html_to_text(text)
 
     return DraftFields(
         to=addresses("To"),
@@ -152,6 +162,132 @@ def _decode_text_part(part) -> str:
         raise DraftParseError("unsupported text charset") from exc
     except UnicodeDecodeError as exc:
         raise DraftParseError("text body is not valid in its declared charset") from exc
+
+
+_BLOCK_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "div",
+        "dd",
+        "dt",
+        "fieldset",
+        "footer",
+        "form",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "pre",
+        "section",
+        "table",
+        "tr",
+        "ul",
+    }
+)
+_PARAGRAPH_TAGS = frozenset({"p", "h1", "h2", "h3", "h4", "h5", "h6"})
+_SKIP_TAGS = frozenset({"script", "style", "head", "title", "template"})
+
+
+class _HtmlToText(HTMLParser):
+    """Flatten HTML to readable plain text. Block elements become line breaks, paragraphs
+    and headings blank lines, ``<br>`` a newline, list items a leading dash, links keep their
+    target in angle brackets when it differs from the link text. Runs of whitespace collapse
+    to one space, as a browser would, except inside ``<pre>``. Scripts, styles and the
+    document head are dropped. Character references are decoded by the parser."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []
+        self._skip = 0
+        self._pre = 0
+        self._href: str | None = None
+        self._link_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip += 1
+            return
+        if self._skip:
+            return
+        if tag == "br":
+            self._out.append("\n")
+        elif tag == "pre":
+            self._pre += 1
+            self._out.append("\n")
+        elif tag in _PARAGRAPH_TAGS:
+            self._out.append("\n\n")
+        elif tag in _BLOCK_TAGS:
+            self._out.append("\n")
+            if tag == "li":
+                self._out.append("- ")
+        elif tag == "a":
+            href = dict(attrs).get("href")
+            self._href = href.strip() if href else None
+            self._link_text = []
+        elif tag == "img":
+            alt = dict(attrs).get("alt")
+            if alt:
+                self._out.append(alt)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in ("br", "img", "hr"):
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _SKIP_TAGS:
+            self._skip = max(0, self._skip - 1)
+            return
+        if self._skip:
+            return
+        if tag == "pre":
+            self._pre = max(0, self._pre - 1)
+            self._out.append("\n")
+        elif tag in _PARAGRAPH_TAGS:
+            self._out.append("\n\n")
+        elif tag in _BLOCK_TAGS and tag != "li":  # the next item or the list end breaks the line
+            self._out.append("\n")
+        elif tag == "a":
+            text = "".join(self._link_text).strip()
+            href = self._href
+            self._href = None
+            if href and not href.lower().startswith(("javascript:", "cid:")):
+                target = href[7:] if href.lower().startswith("mailto:") else href
+                if target and target != text:
+                    self._out.append(f" <{target}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._skip:
+            return
+        if not self._pre:
+            data = re.sub(r"\s+", " ", data.replace("\xa0", " "))
+            at_line_start = not self._out or self._out[-1].endswith(("\n", "- "))
+            if at_line_start:
+                data = data.lstrip(" ")  # indentation between tags, not content
+            if not data:
+                return
+        self._out.append(data)
+        if self._href is not None:
+            self._link_text.append(data)
+
+    def text(self) -> str:
+        lines = [line.rstrip() for line in "".join(self._out).split("\n")]
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip("\n")
+        return text + "\n" if text else ""
+
+
+def html_to_text(html: str) -> str:
+    """Plain-text rendering of an HTML draft body. Formatting is lost by design: AgentMail
+    drafts created here are text-only (the sandbox rejects ``html``)."""
+    parser = _HtmlToText()
+    parser.feed(html)
+    parser.close()
+    return parser.text()
 
 
 def api_body(fields: DraftFields, client_id: str | None = None) -> dict[str, object]:

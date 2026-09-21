@@ -150,7 +150,7 @@ class FetchTests(GatewayTestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual((await self.c.cmd(text)).status, "BAD")
-        self.assertEqual((await self.c.cmd("UID COPY 1 Trash")).status, "BAD")
+        self.assertEqual((await self.c.cmd("UID COPY 1 INBOX")).status, "NO")
         self.assertEqual((await self.c.cmd("NOOP")).status, "OK")
 
     async def test_upstream_failure_during_body_fetch(self):

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("imapgw.session")
 
-CAPABILITIES: tuple[str, ...] = ("IMAP4rev1", "UIDPLUS", "ID", "NAMESPACE")
+CAPABILITIES: tuple[str, ...] = ("IMAP4rev1", "UIDPLUS", "MOVE", "ID", "NAMESPACE")
 
 
 class State(enum.Enum):

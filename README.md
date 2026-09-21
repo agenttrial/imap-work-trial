@@ -91,9 +91,9 @@ Manual check with `nc` (the server accepts bare LF line endings for exactly this
 
 ```text
 $ nc 127.0.0.1 1143
-* OK [CAPABILITY IMAP4rev1 UIDPLUS ID NAMESPACE] imapgw ready
+* OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE] imapgw ready
 A1 LOGIN "candidate@imap.test" "test_agentmail_key"
-A1 OK [CAPABILITY IMAP4rev1 UIDPLUS ID NAMESPACE] LOGIN completed
+A1 OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE] LOGIN completed
 A2 LIST "" "*"
 A3 SELECT INBOX
 A4 UID FETCH 1:* (FLAGS RFC822.SIZE INTERNALDATE)
@@ -127,11 +127,13 @@ Commands (RFC 3501 unless noted):
 | `SEARCH`, `UID SEARCH` | `ALL SEEN UNSEEN FLAGGED UNFLAGGED DELETED UNDELETED DRAFT UNDRAFT ANSWERED UNANSWERED NEW OLD RECENT KEYWORD UNKEYWORD UID <set> <set> BEFORE ON SINCE SENTBEFORE SENTON SENTSINCE LARGER SMALLER FROM TO CC BCC SUBJECT BODY TEXT HEADER NOT OR (...)`; `CHARSET` UTF-8 or US-ASCII; `TEXT`/`BODY` match decoded content (encoded-word headers, base64 and quoted-printable bodies). `KEYWORD x` matches the AgentMail label `x`, see below |
 | `STORE`, `UID STORE` | `FLAGS`, `+FLAGS`, `-FLAGS`, with `.SILENT`; flags `\Seen`, `\Flagged`, `\Deleted` (see mapping below) |
 | `EXPUNGE`, `UID EXPUNGE` (RFC 4315) | moves `\Deleted` messages to trash; deletes `\Deleted` drafts after verifying they were not edited since they were listed |
+| `COPY`, `UID COPY`, `MOVE`, `UID MOVE` (RFC 6851) | into `Trash` only: adds the `trash` label (the same write `EXPUNGE` makes) and answers `[COPYUID ...]` with the message's UID in Trash. `MOVE` announces the source `EXPUNGE` at once; after `COPY` the message leaves its source view at the next safe point. This is how desktop clients delete. Any other destination gets `NO [CANNOT]`; copying a draft gets `NO [CANNOT]` |
 | `APPEND mailbox [(flags)] [date-time] literal` | `Drafts` only; creates a draft through `POST /inboxes/{id}/drafts`; replies `OK [APPENDUID uidvalidity uid]` (RFC 4315) |
 | `ID` (RFC 2971), `NAMESPACE` (RFC 2342), `SUBSCRIBE`, `UNSUBSCRIBE` | minimal responses for client compatibility; `SUBSCRIBE`/`UNSUBSCRIBE` succeed for known mailboxes and change nothing |
 
 Deliberately rejected with `NO [CANNOT]`: `STARTTLS`, `AUTHENTICATE`, `CREATE`, `DELETE`, `RENAME`,
-`COPY`, `IDLE`, and `STORE` of `\Answered` or of keywords (non-system flags). Rejected with `BAD`:
+`COPY`/`MOVE` to anything but `Trash`, `IDLE`, and `STORE` of `\Answered` or of keywords
+(non-system flags). Rejected with `BAD`:
 `FETCH` items `ENVELOPE`, `BODYSTRUCTURE`, `BODY` (structure), numbered MIME sections such as
 `BODY[1]`, the `ALL`/`FULL` macros, non-synchronising literals `{N+}`, unknown commands, and
 malformed syntax. Error text never echoes client-supplied arguments and never contains control
@@ -177,10 +179,14 @@ because the owner is reading their own draft.
 `APPEND` accepts `text/plain` in any charset and transfer encoding, or a `multipart/alternative`
 that contains a `text/plain` part. Bodies are decoded strictly: bytes invalid in the declared
 charset are refused rather than replaced. Recipients keep their display names; the subject is
-decoded. HTML-only messages and attachments are refused with `NO [CANNOT]` (attachments in new
-drafts are out of scope and the sandbox rejects them). Flags and date arguments are accepted and
-ignored. A `client_id` derived from the literal is sent so a transport-level retry of the same
-APPEND does not create duplicates on the real API (two intentional identical APPENDs would share it).
+decoded. An HTML-only message (what Thunderbird's compose window saves) is flattened to plain
+text with the standard library's HTML parser: paragraphs and line breaks are kept, list items
+become dashes, links keep their target in angle brackets, everything else about the formatting
+is lost, because AgentMail drafts created here are text-only. Attachments are refused with
+`NO [CANNOT]` (attachments in new drafts are out of scope and the sandbox rejects them). Flags
+and date arguments are accepted and ignored. A `client_id` derived from the literal is sent so a
+transport-level retry of the same APPEND does not create duplicates on the real API (two
+intentional identical APPENDs would share it).
 
 Once the create request succeeds, `APPEND` answers `OK` and allocates the UID from the create
 response itself. The follow-up listing runs as a separate task outside the command's deadline;
@@ -288,9 +294,19 @@ middle of a `FETCH`, `STORE`, or `SEARCH`.
   by a few seconds, so labels the gateway writes itself are held over stale listings for up to
   60 seconds. Not yet observed in production: 429 responses, permission-scoped keys, mailboxes
   larger than one page.
-- Next: `ENVELOPE`/`BODYSTRUCTURE`, `IDLE`, `MOVE`, `AUTHENTICATE PLAIN`, `LITERAL+`, a
-  Thunderbird interoperability pass (see `STANDARD_IMAP_CLIENT.md`), and a smoke run against the
-  hosted sandbox.
+- **Thunderbird (2026-09-20, real inbox, settings from `STANDARD_IMAP_CLIENT.md`):** account
+  setup, folder list, message list, reading messages and an attachment, star, read/unread all
+  worked unchanged. Thunderbird built its list from `BODY.PEEK[HEADER.FIELDS (...)]` and fetched
+  small messages whole, so it never asked for `ENVELOPE`, `BODYSTRUCTURE`, or numbered parts.
+  Two things failed and were fixed: saving a draft (Thunderbird sends `text/html` only; now
+  flattened to text) and deleting a message (Thunderbird sends `UID COPY n "Trash"`; now
+  supported, plus `MOVE`). Thunderbird's setup wizard cannot probe an unencrypted server on a
+  non-standard port; use "Advanced configuration" to save the account without the probe.
+  Not yet exercised by Thunderbird: messages above its 30 KB threshold, where it switches to
+  `BODYSTRUCTURE` and part fetches.
+- Next: `ENVELOPE`/`BODYSTRUCTURE` (needed by iPhone Mail for every message and by Thunderbird
+  for large ones), `IDLE`, `AUTHENTICATE PLAIN`, `LITERAL+`, and a smoke run against the hosted
+  sandbox.
 
 ## Generated and third-party code disclosure
 

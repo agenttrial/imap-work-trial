@@ -140,7 +140,7 @@ class StatusAndStubTests(GatewayTestCase):
             "CREATE Foo",
             "DELETE INBOX",
             "RENAME INBOX Bar",
-            "COPY 1 Trash",
+            "COPY 1 INBOX",
             "IDLE",
             "STARTTLS",
         ):

@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from imapgw import drafts as draftmod
@@ -606,6 +606,62 @@ class MailboxService:
 
         resync.add_done_callback(_log_failure)
         return uidvalidity, uid, resync
+
+    async def copy_to_trash(
+        self, api: AgentMailClient, inbox_id: str, name: str, items: Sequence[Item]
+    ) -> list[tuple[int, int]]:
+        """IMAP COPY/MOVE into Trash: add the ``trash`` label to each message (AgentMail's own
+        soft delete, the same write EXPUNGE makes) and return ``(source_uid, trash_uid)`` pairs.
+
+        The Trash UID is allocated here, from what we know about the message, and the item is
+        pinned in the Trash view until a listing shows it, because the list endpoint can lag a
+        label write (observed in production). This mirrors how APPEND handles a new draft.
+        Stops at the first upstream failure: messages already labelled stay in Trash, and the
+        caller reports the failure; a client retries the remainder."""
+        mdef = self.lookup(name)
+        assert mdef is not None and mdef.kind == "messages"
+        trash = self.defs["Trash"]
+        if self.latest(inbox_id, trash.name) is None:
+            # Give the messages already in Trash their UIDs before allocating new ones, so
+            # UIDs stay in arrival order. Runs before any write; a failure changes nothing.
+            await self.sync(api, inbox_id, trash.name, force=True)
+        pairs: list[tuple[int, int]] = []
+        for item in items:
+            result = await api.update_labels(inbox_id, item.remote_id, add=("trash",))
+            labels = frozenset(str(x) for x in (result.get("labels") or []))
+            if "trash" not in labels:
+                labels = item.labels | {"trash"}
+            self._hold_labels(inbox_id, item.remote_id, labels)
+            trash_uid = self.store.ensure_uids(
+                inbox_id, trash.name, [(item.remote_id, item.remote_id)]
+            )[item.remote_id]
+            moved = Item(
+                uid=trash_uid,
+                remote_key=item.remote_key,
+                remote_id=item.remote_id,
+                flags=message_flags(labels),
+                internaldate=item.internaldate,
+                size_hint=item.size_hint,
+                labels=labels,
+                from_=item.from_,
+                to=item.to,
+                subject=item.subject,
+            )
+
+            def build(uid_value: int, *, moved=moved) -> Item:
+                return replace(moved, uid=uid_value)
+
+            self._pin(
+                inbox_id,
+                trash.name,
+                item.remote_id,
+                ((item.internaldate, item.remote_id), item.remote_id, item.remote_id, build),
+            )
+            pairs.append((item.uid, trash_uid))
+        if pairs:
+            for key in ((inbox_id, mdef.name), (inbox_id, trash.name)):
+                self._generation[key] = self._generation.get(key, 0) + 1
+        return pairs
 
     async def set_flag(
         self, api: AgentMailClient, inbox_id: str, name: str, item: Item, flag: str, value: bool

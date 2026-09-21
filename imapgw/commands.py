@@ -4,7 +4,7 @@ responses through the session; it raises :class:`CommandFailed` for NO/BAD outco
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 
 from imapgw import responses as r
 from imapgw.parser import Command, ListTok, Token, TokenizeError, astring_text
@@ -655,6 +655,95 @@ async def _uid_expunge(session: Session, cmd: Command, args: tuple) -> None:
     session.write(r.tagged(cmd.tag, "OK", "UID EXPUNGE completed"))
 
 
+def _uid_set(uids: Sequence[int]) -> str:
+    """``1,3,4,5,9`` -> ``1,3:5,9`` (RFC 4315 uid-set form)."""
+    out: list[str] = []
+    start = prev = None
+    for u in sorted(uids):
+        if start is None:
+            start = prev = u
+        elif u == prev + 1:
+            prev = u
+        else:
+            out.append(f"{start}:{prev}" if start != prev else str(start))
+            start = prev = u
+    if start is not None:
+        out.append(f"{start}:{prev}" if start != prev else str(start))
+    return ",".join(out)
+
+
+async def copy(session: Session, cmd: Command) -> None:
+    await _copy(session, cmd, cmd.args, uid_mode=False, move=False)
+
+
+async def move(session: Session, cmd: Command) -> None:
+    await _copy(session, cmd, cmd.args, uid_mode=False, move=True)
+
+
+async def _uid_copy(session: Session, cmd: Command, args: tuple) -> None:
+    await _copy(session, cmd, args, uid_mode=True, move=False)
+
+
+async def _uid_move(session: Session, cmd: Command, args: tuple) -> None:
+    await _copy(session, cmd, args, uid_mode=True, move=True)
+
+
+async def _copy(session: Session, cmd: Command, args: tuple, *, uid_mode: bool, move: bool) -> None:
+    """COPY and MOVE (RFC 6851) into Trash. Desktop clients delete by copying to Trash and
+    expunging, or by MOVE when advertised. Both become "add the trash label", the same write
+    EXPUNGE makes, so Trash is the only destination that has an honest meaning here."""
+    sel = session.require_selected()
+    assert session.api is not None and session.inbox_id is not None
+    verb = "MOVE" if move else "COPY"
+    label = f"UID {verb}" if uid_mode else verb
+    if len(args) != 2 or not isinstance(args[0], Atom):
+        raise bad(f"{label} requires a sequence set and a mailbox name")
+    name = _arg_text(Command(cmd.tag, cmd.name, args), 1, "mailbox name")
+    try:
+        seqset = parse_sequence_set(args[0].value)
+    except FetchSyntaxError as exc:
+        raise bad(str(exc)) from exc
+    dest = session.mailboxes.lookup(name)
+    if dest is None:
+        raise no("mailbox does not exist", "TRYCREATE")
+    if dest.name != "Trash":
+        raise no(f"{verb} is only supported into Trash", "CANNOT")
+    source = session.mailboxes.lookup(sel.name)
+    assert source is not None
+    if source.kind != "messages":
+        raise no("drafts cannot be copied to Trash; delete them instead", "CANNOT")
+    if move and sel.read_only:
+        raise no("mailbox is read-only", "READ-ONLY")
+
+    snapshot = session.mailboxes.latest(session.inbox_id, sel.name)
+    if snapshot is None:
+        snapshot = await session.mailboxes.sync(session.api, session.inbox_id, sel.name, force=True)
+    if uid_mode:
+        uids = select_numbers(seqset, sel.uids)
+    else:
+        seqs = select_numbers(seqset, list(range(1, len(sel.uids) + 1)))
+        uids = [sel.uids[s - 1] for s in seqs]
+    items = [snapshot.by_uid[u] for u in uids if u in snapshot.by_uid]
+    if not items:
+        session.write(r.tagged(cmd.tag, "OK", f"{label} completed"))
+        return
+
+    pairs = await session.mailboxes.copy_to_trash(session.api, session.inbox_id, sel.name, items)
+    uidvalidity, _ = session.mailboxes.mailbox_info(session.inbox_id, "Trash")
+    code = (
+        f"COPYUID {uidvalidity} {_uid_set([p[0] for p in pairs])} {_uid_set([p[1] for p in pairs])}"
+    )
+    log.info("[%s] %s %d message(s) from %s to Trash", session.conn_id, verb, len(pairs), sel.name)
+    if not move:
+        session.write(r.tagged(cmd.tag, "OK", f"{label} completed", code=code))
+        return
+    # RFC 6851: COPYUID goes in an untagged OK, then the EXPUNGE responses for the source.
+    session.write(r.untagged_ok("Moved", code=code))
+    await session.mailboxes.sync(session.api, session.inbox_id, sel.name, force=True)
+    session.flush_pending()
+    session.write(r.tagged(cmd.tag, "OK", f"{label} completed"))
+
+
 async def close_with_expunge(session: Session, cmd: Command) -> None:
     sel = session.require_selected()
     if not sel.read_only and session.deleted_uids():
@@ -726,7 +815,15 @@ async def check(session: Session, cmd: Command) -> None:
     session.write(r.tagged(cmd.tag, "OK", "CHECK completed"))
 
 
-UID_HANDLERS.update({"SEARCH": _uid_search, "STORE": _uid_store, "EXPUNGE": _uid_expunge})
+UID_HANDLERS.update(
+    {
+        "SEARCH": _uid_search,
+        "STORE": _uid_store,
+        "EXPUNGE": _uid_expunge,
+        "COPY": _uid_copy,
+        "MOVE": _uid_move,
+    }
+)
 HANDLERS.update(
     {
         "SEARCH": search,
@@ -739,10 +836,11 @@ HANDLERS.update(
         "SUBSCRIBE": subscribe,
         "UNSUBSCRIBE": subscribe,
         "CHECK": check,
+        "COPY": copy,
+        "MOVE": move,
         "CREATE": _unsupported("mailboxes are fixed views and cannot be created"),
         "DELETE": _unsupported("mailboxes are fixed views and cannot be deleted"),
         "RENAME": _unsupported("mailboxes are fixed views and cannot be renamed"),
-        "COPY": _unsupported("COPY is not supported"),
         "IDLE": _unsupported("IDLE is not supported; poll with NOOP"),
     }
 )

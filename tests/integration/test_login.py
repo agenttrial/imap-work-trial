@@ -12,7 +12,7 @@ class LoginTests(GatewayTestCase):
         c = await self.client()
         resp = await c.cmd(f'LOGIN "{INBOX_ID}" "{API_KEY}"')
         self.assertEqual(resp.status, "OK", resp)
-        self.assertEqual(resp.code(), "CAPABILITY IMAP4rev1 UIDPLUS ID NAMESPACE")
+        self.assertEqual(resp.code(), "CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE")
         again = await c.cmd(f'LOGIN "{INBOX_ID}" "{API_KEY}"')
         self.assertEqual(again.status, "BAD")
 

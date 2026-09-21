@@ -7,6 +7,7 @@ from imapgw.drafts import (
     api_body,
     client_id_for,
     content_key,
+    html_to_text,
     parse_append,
     parse_iso8601,
     render_draft,
@@ -120,11 +121,31 @@ class ParseTests(unittest.TestCase):
         fields = parse_append(raw)
         self.assertEqual(fields.text.strip(), "plain body")
 
-    def test_html_only_rejected(self):
-        raw = b"To: x@example.com\r\nSubject: h\r\nContent-Type: text/html\r\n\r\n<p>hi</p>\r\n"
+    def test_html_only_is_flattened_to_text(self):
+        # Thunderbird saves drafts as text/html with no plain alternative (observed 2026-09-20).
+        raw = (
+            b"To: x@example.com\r\nSubject: h\r\nMIME-Version: 1.0\r\n"
+            b"Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n"
+            b"<!DOCTYPE html>\r\n<html>\r\n  <head>\r\n\r\n"
+            b'    <meta http-equiv="content-type" content="text/html; charset=UTF-8">\r\n'
+            b"  </head>\r\n  <body>\r\n    <p>This is a line of text</p>\r\n  </body>\r\n</html>"
+        )
+        fields = parse_append(raw)
+        self.assertEqual(fields.text, "This is a line of text\n")
+        self.assertEqual(fields.subject, "h")
+
+    def test_html_in_undecodable_charset_rejected(self):
+        raw = b"To: x@example.com\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>\xff</p>\r\n"
+        with self.assertRaises(DraftParseError):
+            parse_append(raw)
+
+    def test_no_text_part_at_all_rejected(self):
+        raw = (
+            b"To: x@example.com\r\nMIME-Version: 1.0\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n"
+        )
         with self.assertRaises(DraftParseError) as cm:
             parse_append(raw)
-        self.assertIn("text/plain", str(cm.exception))
+        self.assertIn("text/plain or text/html", str(cm.exception))
 
     def test_attachment_rejected(self):
         raw = (
@@ -169,10 +190,6 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(parse_iso8601("garbage").year, 1970)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewRegressionTests(unittest.TestCase):
     def test_undecodable_body_is_rejected_not_replaced(self):  # F19
         with self.assertRaises(DraftParseError):
@@ -209,3 +226,45 @@ class ReviewRegressionTests(unittest.TestCase):
         )
         msg = message_from_bytes(render_draft(relabelled, INBOX), policy=policy.default)
         self.assertEqual(msg["Date"], "Mon, 17 Aug 2026 23:00:00 +0000")
+
+
+class HtmlToTextTests(unittest.TestCase):
+    def test_paragraphs_breaks_and_entities(self):
+        self.assertEqual(
+            html_to_text("<p>One</p><p>Two &amp; three&nbsp;four</p>"), "One\n\nTwo & three four\n"
+        )
+        self.assertEqual(
+            html_to_text("line one<br>line two<br/>line three"), "line one\nline two\nline three\n"
+        )
+
+    def test_lists_and_blocks(self):
+        self.assertEqual(
+            html_to_text("<ul><li>alpha</li><li>beta</li></ul><div>after</div>"),
+            "- alpha\n- beta\n\nafter\n",
+        )
+
+    def test_links_keep_target_when_it_differs(self):
+        self.assertEqual(
+            html_to_text(
+                '<p>See <a href="https://example.com/x">the docs</a> and '
+                '<a href="mailto:a@b.c">a@b.c</a>.</p>'
+            ),
+            "See the docs <https://example.com/x> and a@b.c.\n",
+        )
+
+    def test_pre_keeps_whitespace_and_head_is_dropped(self):
+        self.assertEqual(html_to_text("<pre>  keep\n   this</pre>"), "  keep\n   this\n")
+        self.assertEqual(
+            html_to_text("<style>p{color:red}</style><script>x()</script><h1>Title</h1>plain"),
+            "Title\n\nplain\n",
+        )
+
+    def test_unicode_and_degenerate_input(self):
+        self.assertEqual(html_to_text("<p>café 東京 \U0001f680</p>"), "café 東京 🚀\n")
+        self.assertEqual(html_to_text(""), "")
+        self.assertEqual(html_to_text("no tags at all"), "no tags at all\n")
+        self.assertEqual(html_to_text("<p><b>unclosed"), "unclosed\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

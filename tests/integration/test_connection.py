@@ -9,12 +9,12 @@ class ConnectionTests(GatewayTestCase):
     async def test_greeting_and_capability(self):
         c = await self.client()
         self.assertEqual(
-            c.greeting, b"* OK [CAPABILITY IMAP4rev1 UIDPLUS ID NAMESPACE] imapgw ready"
+            c.greeting, b"* OK [CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE] imapgw ready"
         )
         resp = await c.cmd("CAPABILITY")
         self.assertEqual(resp.status, "OK")
         self.assertEqual(
-            [u.line for u in resp.untagged], [b"* CAPABILITY IMAP4rev1 UIDPLUS ID NAMESPACE"]
+            [u.line for u in resp.untagged], [b"* CAPABILITY IMAP4rev1 UIDPLUS MOVE ID NAMESPACE"]
         )
         self.assertEqual(resp.text, "CAPABILITY completed")
 
